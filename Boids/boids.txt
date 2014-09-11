@@ -1,0 +1,320 @@
+-- -------------------------------------------------------
+--main    
+-- -------------------------------------------------------
+function setup()
+    numberOfSchools = 6
+    iparameter("currentSchool",1,numberOfSchools,1)
+    parameter("maxSpeed",0,200,100)
+    parameter("detectRadius", 0,200,75)
+    parameter("personalBubble", 0,1,0.75)
+    parameter("cohereStr",0,0.4,0.15)
+    parameter("alignStr",0,0.25,0.075)
+    parameter("alignDamping",0,200,100)
+    parameter("avoidStr",0,100,30)
+    parameter("xenophobia", 0,100,60)
+    iparameter("drawCircle",0,2,0)
+    fill(0, 0, 0, 0)
+    strokeWidth(3)
+
+    birds = {}
+    schools = {}
+    settings = {}
+    for i = 1, numberOfSchools do
+        table.insert(schools, i, {})
+        table.insert(settings, i, Config())
+    end
+    touchesx = {}
+    touchesy = {}
+
+    for i = 1,50 do
+        -- wow thats an ugly function call. fix this.
+        makeBird(WIDTH/2,HEIGHT/2,math.random(360),maxSpeed, math.random(numberOfSchools-1))
+    end
+    prevSchool = currentSchool
+end
+
+function draw()
+    background(40, 40, 50)
+    if currentSchool ~= prevSchool then
+        settings[currentSchool]:load()
+    else
+        settings[currentSchool]:save()
+    end
+    prevSchool = currentSchool
+    for i,s in pairs(schools) do
+        for j,b in pairs(schools[i]) do 
+            b:findNeighbors()
+            b:flock()
+            b:move() 
+            b:wrap()
+            b:draw()
+        end
+    end
+end
+
+function touched(t)
+    if t.state == BEGAN then
+        table.insert(touchesx, t.id, t.x)
+        table.insert(touchesy, t.id, t.y)
+    elseif t.state == ENDED then
+        local dx = t.x - touchesx[t.id]
+        local dy = t.y - touchesy[t.id]
+        makeBird(t.x, t.y, math.atan2(dy, dx), pythag(dy, dx)/4, currentSchool)
+    end
+end
+
+function makeBird(x, y, dir, spd, school) 
+    table.insert(schools[school], Bird(x, y, dir, spd, school))
+end
+
+-- -------------------------------------------------------
+--bird
+-- -------------------------------------------------------
+Bird = class()
+head = vec2(10,0)
+wing = vec2(-3,-3)
+
+function Bird:init(x, y, dir, speed, school)
+    self.school = school
+    self.c = schoolColor(school)
+    self.p = vec2(x,y)
+    self.neighbors = {}
+    self.friends = {}
+    self.v = speed * vec2(math.cos(dir), math.sin(dir))
+    self.a = vec2(0,0)
+    self.setting = settings[self.school]
+end
+
+function Bird:rad()
+    return math.atan2(self.v.y, self.v.x)
+end
+function Bird:deg()
+    return math.deg(self:rad())
+end
+
+function Bird:move()
+-- prevents undesired behavior when the simulation is paused due to scrolling through the parameters
+    if DeltaTime < 1 then 
+        self.p = self.p + self.v * DeltaTime 
+    end
+end
+
+function Bird:draw()
+    pushMatrix()
+    stroke(self.c)
+    translate(self.p.x, self.p.y)
+    if 0 < self.setting.DrawCircle then
+        strokeWidth(1)
+        ellipse(0,0,2*self.setting.DetectRadius)
+        if 1 < self.setting.DrawCircle then
+            ellipse(0,0,2*self.setting.DetectRadius * self.setting.PersonalBubble)
+        end
+        strokeWidth(3)
+    end
+    rotate(self:deg())
+    line(head.x, head.y, wing.x, wing.y)
+    line(head.x, head.y, wing.x, -wing.y)
+    popMatrix()
+end
+
+function Bird:wrap()
+    if self.p.x < 0 then self.p.x = self.p.x + WIDTH end
+    if self.p.x > WIDTH then self.p.x = self.p.x - WIDTH end
+    if self.p.y < 0 then self.p.y = self.p.y + HEIGHT end
+    if self.p.y > HEIGHT then self.p.y = self.p.y - HEIGHT end
+end
+
+function Bird:flock()    
+    sum = vec2(0,0)
+    sum = sum + self:cohere() * self.setting.CohereStr
+    sum = sum + self:align() * self.setting.AlignStr
+    sum = sum + self:avoid() --* self.setting.AvoidStr  handled inside avoid()
+    self.v = self:limit(self.v*1.01 + sum)
+end
+
+function Bird:cohere()
+    local sum = vec2(0,0)
+    local count = 0
+    for i,b in pairs(self.friends) do
+        sum = sum - b.pathTo 
+        count = count + 1
+    end
+    if count == 0 then
+        return vec2(0,0)
+    else
+        sum = sum / count
+        sum = sum + self.p 
+        return self:steer(sum)
+    end
+end
+
+function Bird:steer(target)
+    local desired = path(self.p, target) 
+    local d = magnitude(desired)
+    if d == 0 then 
+        return vec2(0,0)
+    else
+        desired = maxSpeed * desired / d
+        if d < self.setting.AlignDamping then
+            desired = desired * d / self.setting.AlignDamping  --damping
+        end
+        local steer = path(desired, self.v) --copied this from an online source. not 100% sure its correct, but seems to work.
+        return steer
+    --    return self:limit(steer)
+    end
+end
+
+function Bird:align()
+    local count = 0
+    local sum = count * self.v
+    for i,b in pairs(self.friends) do
+        sum = sum + b.v
+        count = count + 1
+    end
+    if count == 0 then return vec2(0,0) end
+    return sum / count
+end
+
+function Bird:avoid() 
+    local mean = vec2(0,0)
+    local count = 0
+
+    for i,b in pairs(self.neighbors) do
+        local radius = self.setting.PersonalBubble * self.setting.DetectRadius
+        if 0 < b.distTo and b.distTo < radius then
+            local scale = 1 - (b.distTo / radius)
+            if b.school == self.school then 
+                scale = scale * self.setting.AvoidStr
+            else
+                scale = scale * self.setting.Xenophobia
+            end
+            local direction = -b.pathTo
+            direction = direction / b.distTo
+            mean = mean + scale * direction
+            count = count + 1
+        end
+    end
+    if count == 0 then 
+        return vec2(0,0)
+    else
+        return mean / count
+    end
+end
+
+function Bird:findNeighbors()
+    self.neighbors = {}
+    self.friends = {}
+    for i = 1, numberOfSchools do
+        for j,b in pairs(schools[i]) do
+            b.pathTo = path(self.p, b.p)
+            b.distTo = magnitude(b.pathTo)
+            if 0 < b.distTo and b.distTo < self.setting.DetectRadius then
+                table.insert(self.neighbors, b)
+                if self.school == i then 
+                    table.insert(self.friends, b)
+                end
+            end
+        end
+    end
+end
+
+function Bird:limit(a)
+    local m = magnitude(a)
+    if self.setting.MaxSpeed < m then
+        a = self.setting.MaxSpeed * a / m
+    end
+    return a
+end
+
+-- -------------------------------------------------------
+--helper
+-- -------------------------------------------------------
+
+red = color(255, 0, 0, 255)
+blue = color(0, 94, 255, 255)
+green = color(10, 255, 0, 255)
+yellow = color(237, 255, 0, 255)
+purple = color(255, 0, 222, 255)
+white = color(255, 255, 255, 255)
+black = color(0, 0, 0, 255)
+
+function avgVec(input, count)
+    if count == 0 then
+        return vec2(0,0)
+    else
+        return input / count
+    end
+end
+
+function path(start, finish) -- vector pointing from start to finish, taking into account wrapping
+    local new = finish
+    local diff = start - finish
+    if (HEIGHT/2) < diff.y then 
+        new = new + vec2(0,HEIGHT) 
+    elseif diff.y < -(HEIGHT/2) then
+        new = new - vec2(0,HEIGHT)
+    end
+    if (WIDTH/2) < diff.x then 
+        new = new + vec2(WIDTH,0) 
+    elseif diff.x < -(WIDTH/2) then
+        new = new - vec2(WIDTH,0)
+    end
+    return new - start
+end
+
+function pathDist(a, b)
+    return magnitude(path(a, b))
+end
+
+function magnitude(a)
+    return math.sqrt(a.x*a.x + a.y*a.y)
+end
+
+function pythag(a,b)
+    return math.sqrt(a*a + b*b)
+end
+
+function schoolColor (school)
+    -- lua doesn't have switch statements?? 
+    local c = purple
+    if school == 1 then c = white
+    elseif school == 2 then c = red    
+    elseif school == 3 then c = green
+    elseif school == 4 then c = blue
+    elseif school == 5 then c = yellow end
+    return c
+end
+
+
+-- -------------------------------------------------------
+--Config()
+-- -------------------------------------------------------
+Config = class()
+
+function Config:init()
+    self:save()
+end
+
+function Config:save()
+    self.MaxSpeed = maxSpeed
+    self.DetectRadius = detectRadius
+    self.PersonalBubble = personalBubble
+    self.CohereStr = cohereStr
+    self.AlignStr = alignStr
+    self.AlignDamping = alignDamping
+    self.AvoidStr = avoidStr
+    self.Xenophobia = xenophobia
+    self.DrawCircle = drawCircle
+end
+
+function Config:load()
+    maxSpeed = self.MaxSpeed
+    detectRadius = self.DetectRadius
+    personalBubble = self.PersonalBubble
+    cohereStr = self.CohereStr
+    alignStr = self.AlignStr
+    alignDamping = self.AlignDamping
+    avoidStr = self.AvoidStr
+    xenophobia = self.Xenophobia
+    drawCircle = self.DrawCircle
+end
